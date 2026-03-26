@@ -2,6 +2,8 @@ import os
 import re
 import asyncio
 import logging
+import random
+from datetime import datetime, timedelta
 from flask import Flask
 from threading import Thread
 from aiogram import Bot, Dispatcher, types, F
@@ -13,7 +15,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 # --- 1. ВЕБ-СЕРВЕР ---
 app = Flask(__name__)
 @app.route('/')
-def index(): return "AUTOPUB IS RUNNING"
+def index(): return "AUTOPUB ACTIVE"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
@@ -31,11 +33,29 @@ CHANNELS = {
     "🌎 Мир": -1003760654806, "📱 Роблокс": -1003780188516
 }
 
-bot = Bot(token=TOKEN)
+# Красивые фразы для подписей (добавляются случайно)
+PROMO_PHRASES = [
+    "\n\n✨ <b>Лучшие скины для парней тут:</b> @skini_dlya_malchikov_roblox",
+    "\n\n🎀 <b>Эстетика девчачьих игр:</b> @estetica_rbx",
+    "\n\n🔥 <b>Горячие новости ROBLOX:</b> @R0B0L0XNOVOSTI",
+    "\n\n🕵️ <b>Секреты админов:</b> @roblox_secreti_adminov",
+    "\n\n🎮 <b>Стань про-геймером:</b> @roblox_geimer",
+    "\n\n🗺️ <b>Твой личный гид по играм:</b> @roblox_tvoi_gid",
+    "\n\n🔑 <b>Инсайды, которых нет у других:</b> @roblox_insaider",
+    "\n\n🗞️ <b>Свежий выпуск газеты:</b> @roblox_gazeta",
+    "\n\n🌍 <b>Весь мир Роблокса здесь:</b> @rbx_mir",
+    "\n\n📱 <b>Официальное сообщество:</b> @R0BL0X_0FFICIAL"
+]
+
+bot = Bot(token=TOKEN, parse_mode="HTML")
 dp = Dispatcher(storage=MemoryStorage())
+
+# Счётчик для статистики
+stats_data = {"total_posts": 0}
 
 class PostState(StatesGroup):
     selecting = State()
+    waiting_time = State()
     typing_text = State()
 
 def clean_ads(text):
@@ -59,7 +79,10 @@ def get_selection_kb(selected_names):
 
 # --- ОБРАБОТЧИКИ ---
 
-# Хендлер для Фото и Видео
+@dp.message(F.text == "/stats", F.from_user.id == ADMIN_ID)
+async def show_stats(message: types.Message):
+    await message.answer(f"📊 <b>Статистика бота:</b>\nВсего опубликовано постов: <code>{stats_data['total_posts']}</code>")
+
 @dp.message(F.from_user.id == ADMIN_ID, (F.photo | F.video))
 async def handle_media(message: types.Message, state: FSMContext):
     file_id = message.photo[-1].file_id if message.photo else message.video.file_id
@@ -69,19 +92,14 @@ async def handle_media(message: types.Message, state: FSMContext):
     await message.reply(f"📥 {msg_type} получено! Выбери каналы:", reply_markup=get_selection_kb([]))
     await state.set_state(PostState.selecting)
 
-# Специальный хендлер для текста по команде /post
 @dp.message(F.from_user.id == ADMIN_ID, F.text.startswith('/post'))
 async def handle_post_command(message: types.Message, state: FSMContext):
-    # Отрезаем "/post " (первые 6 символов)
     pure_text = message.text[6:].strip()
-    
     if not pure_text:
-        await message.reply("❌ Напиши текст после команды, например: `/post Привет всем!`")
+        await message.reply("❌ Напиши текст после /post")
         return
-
-    old_caption = clean_ads(pure_text)
-    await state.update_data(file_id=None, msg_type="text", old_caption=old_caption, selected_channels=[])
-    await message.reply("📝 Текст принят! Куда отправляем?", reply_markup=get_selection_kb([]))
+    await state.update_data(file_id=None, msg_type="text", old_caption=clean_ads(pure_text), selected_channels=[])
+    await message.reply("📝 Текст принят! Выбери каналы:", reply_markup=get_selection_kb([]))
     await state.set_state(PostState.selecting)
 
 @dp.callback_query(F.data.startswith('toggle_'), PostState.selecting)
@@ -103,40 +121,65 @@ async def select_all(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "confirm_select", PostState.selecting)
 async def confirm(callback: types.CallbackQuery, state: FSMContext):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚡ Сейчас", callback_data="time_0")],
+        [InlineKeyboardButton(text="⏰ Через 15 мин", callback_data="time_15")],
+        [InlineKeyboardButton(text="⏰ Через 1 час", callback_data="time_60")]
+    ])
+    await callback.message.answer("Когда публикуем?", reply_markup=kb)
+    await state.set_state(PostState.waiting_time)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith('time_'), PostState.waiting_time)
+async def process_time(callback: types.CallbackQuery, state: FSMContext):
+    minutes = int(callback.data.replace('time_', ''))
+    await state.update_data(delay=minutes)
+    
     data = await state.get_data()
     if data['msg_type'] == "text":
-        await send_posts(callback.message, state)
+        await finalize_post(callback.message, state)
     else:
-        await callback.message.answer("Нужно изменить описание?\nОтправь новый текст, '.' (оставить старый) или '-' (удалить).")
+        await callback.message.answer("Нужно изменить описание?\nОтправь текст, '.' (оставить) или '-' (без текста).")
         await state.set_state(PostState.typing_text)
     await callback.answer()
 
 @dp.message(PostState.typing_text)
 async def process_custom_text(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    if message.text == ".": caption = data['old_caption']
-    elif message.text == "-": caption = ""
-    else: caption = message.text
-    
+    caption = data['old_caption'] if message.text == "." else ("" if message.text == "-" else message.text)
     await state.update_data(old_caption=caption)
-    await send_posts(message, state)
+    await finalize_post(message, state)
+
+async def finalize_post(message_obj, state: FSMContext):
+    data = await state.get_data()
+    delay = data.get('delay', 0)
+    
+    if delay > 0:
+        await message_obj.answer(f"🕒 Пост запланирован через {delay} мин.")
+        await asyncio.sleep(delay * 60)
+    
+    await send_posts(message_obj, state)
 
 async def send_posts(message_obj, state: FSMContext):
     data = await state.get_data()
-    caption, file_id, msg_type = data['old_caption'], data['file_id'], data['msg_type']
-    selected_channels = data['selected_channels']
+    # Добавляем случайную подпись к тексту
+    promo = random.choice(PROMO_PHRASES)
+    caption = f"{data['old_caption']}{promo}"
+    
+    file_id, msg_type, selected_channels = data['file_id'], data['msg_type'], data['selected_channels']
 
-    status = await message_obj.answer(f"⏳ Публикую в {len(selected_channels)} каналов...")
     for name in selected_channels:
         try:
             cid = CHANNELS[name]
             if msg_type == "photo": await bot.send_photo(cid, file_id, caption=caption)
             elif msg_type == "video": await bot.send_video(cid, file_id, caption=caption)
             else: await bot.send_message(cid, caption)
+            stats_data["total_posts"] += 1
             await asyncio.sleep(0.4)
         except Exception as e:
             await message_obj.answer(f"❌ Ошибка в {name}: {e}")
-    await status.edit_text("✅ Готово!")
+    
+    await message_obj.answer("✅ Публикация завершена!")
     await state.clear()
 
 @dp.callback_query(F.data == "cancel")
