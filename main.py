@@ -59,6 +59,7 @@ def get_selection_kb(selected_names):
 
 # --- ОБРАБОТЧИКИ ---
 
+# Хендлер для Фото и Видео
 @dp.message(F.from_user.id == ADMIN_ID, (F.photo | F.video))
 async def handle_media(message: types.Message, state: FSMContext):
     file_id = message.photo[-1].file_id if message.photo else message.video.file_id
@@ -68,12 +69,19 @@ async def handle_media(message: types.Message, state: FSMContext):
     await message.reply(f"📥 {msg_type} получено! Выбери каналы:", reply_markup=get_selection_kb([]))
     await state.set_state(PostState.selecting)
 
-@dp.message(F.from_user.id == ADMIN_ID, F.text, ~F.state(PostState.typing_text))
-async def handle_text(message: types.Message, state: FSMContext):
-    if message.text.startswith('/'): return
-    old_caption = clean_ads(message.text)
+# Специальный хендлер для текста по команде /post
+@dp.message(F.from_user.id == ADMIN_ID, F.text.startswith('/post'))
+async def handle_post_command(message: types.Message, state: FSMContext):
+    # Отрезаем "/post " (первые 6 символов)
+    pure_text = message.text[6:].strip()
+    
+    if not pure_text:
+        await message.reply("❌ Напиши текст после команды, например: `/post Привет всем!`")
+        return
+
+    old_caption = clean_ads(pure_text)
     await state.update_data(file_id=None, msg_type="text", old_caption=old_caption, selected_channels=[])
-    await message.reply("📝 Текст получен! Выбери каналы:", reply_markup=get_selection_kb([]))
+    await message.reply("📝 Текст принят! Куда отправляем?", reply_markup=get_selection_kb([]))
     await state.set_state(PostState.selecting)
 
 @dp.callback_query(F.data.startswith('toggle_'), PostState.selecting)
@@ -97,7 +105,6 @@ async def select_all(callback: types.CallbackQuery, state: FSMContext):
 async def confirm(callback: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if data['msg_type'] == "text":
-        # Для текста сразу переходим к рассылке, чтобы не вводить дважды
         await send_posts(callback.message, state)
     else:
         await callback.message.answer("Нужно изменить описание?\nОтправь новый текст, '.' (оставить старый) или '-' (удалить).")
@@ -107,12 +114,9 @@ async def confirm(callback: types.CallbackQuery, state: FSMContext):
 @dp.message(PostState.typing_text)
 async def process_custom_text(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    if message.text == ".":
-        caption = data['old_caption']
-    elif message.text == "-":
-        caption = ""
-    else:
-        caption = message.text
+    if message.text == ".": caption = data['old_caption']
+    elif message.text == "-": caption = ""
+    else: caption = message.text
     
     await state.update_data(old_caption=caption)
     await send_posts(message, state)
@@ -120,10 +124,10 @@ async def process_custom_text(message: types.Message, state: FSMContext):
 async def send_posts(message_obj, state: FSMContext):
     data = await state.get_data()
     caption, file_id, msg_type = data['old_caption'], data['file_id'], data['msg_type']
-    selected_names = data['selected_channels']
+    selected_channels = data['selected_channels']
 
-    status = await message_obj.answer(f"⏳ Публикую...")
-    for name in selected_names:
+    status = await message_obj.answer(f"⏳ Публикую в {len(selected_channels)} каналов...")
+    for name in selected_channels:
         try:
             cid = CHANNELS[name]
             if msg_type == "photo": await bot.send_photo(cid, file_id, caption=caption)
