@@ -7,7 +7,7 @@ from threading import Thread
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import Context
+from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 # --- 1. МИНИ-СЕРВЕР ДЛЯ RENDER ---
@@ -24,7 +24,7 @@ TOKEN = '8699304309:AAGkHhyeGQqzg3KQtzez_5B9a3RcQsTTC7g'
 ADMIN_ID = 5215754222  # Твой ID
 
 CHANNELS = {
-   "🌸 Эстетика": -1003716842510,
+  "🌸 Эстетика": -1003716842510,
     "💼 Админы": -1003728156774,
     "⚡ Новости": -1003845949396,
     "😎 Скины": -1003771506128,
@@ -49,7 +49,7 @@ def clean_ads(text):
     return re.sub(r'@\w+|t\.me/\S+|http\S+', '', text).strip()
 
 @dp.message(F.video)
-async def handle_video(message: types.Message, state: Context):
+async def handle_video(message: types.Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
     clean_text = clean_ads(message.caption)
     await state.update_data(video_id=message.video.file_id, old_caption=clean_text)
@@ -62,7 +62,7 @@ async def handle_video(message: types.Message, state: Context):
     await state.set_state(PostState.choosing_channel)
 
 @dp.callback_query(F.data.startswith('chan_'))
-async def process_channel(callback: types.CallbackQuery, state: Context):
+async def process_channel(callback: types.CallbackQuery, state: FSMContext):
     channel_name = callback.data.replace('chan_', '')
     await state.update_data(target_channel=CHANNELS[channel_name])
     await callback.message.answer(f"Выбран: {channel_name}\nНапиши текст ('.' - старый, '-' - без текста):")
@@ -70,7 +70,7 @@ async def process_channel(callback: types.CallbackQuery, state: Context):
     await callback.answer()
 
 @dp.message(PostState.typing_text)
-async def process_final(message: types.Message, state: Context):
+async def process_final(message: types.Message, state: FSMContext):
     data = await state.get_data()
     caption = data['old_caption'] if message.text == "." else ("" if message.text == "-" else message.text)
     try:
@@ -80,10 +80,10 @@ async def process_final(message: types.Message, state: Context):
         await message.answer(f"❌ Ошибка: {e}")
     await state.clear()
 
-async def main():
+async def main_logic():
     Thread(target=run).start()
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())
+    asyncio.run(main_logic())
