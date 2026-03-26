@@ -10,37 +10,25 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-# --- 1. ВЕБ-СЕРВЕР (ДЛЯ RENDER) ---
+# --- 1. ВЕБ-СЕРВЕР ---
 app = Flask(__name__)
-
 @app.route('/')
-def index():
-    return "AUTOPUB IS RUNNING"
-
-@app.route('/health')
-def health():
-    return "OK", 200
+def index(): return "AUTOPUB IS RUNNING"
 
 def run_flask():
-    # Render требует слушать порт из переменной окружения PORT
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- 2. НАСТРОЙКИ БОТА ---
+# --- 2. НАСТРОЙКИ ---
 TOKEN = '8699304309:AAGkHhyeGQqzg3KQtzez_5B9a3RcQsTTC7g'
 ADMIN_ID = 5215754222
 
 CHANNELS = {
-    "🌸 Эстетика": -1003716842510,
-    "💼 Админы": -1003728156774,
-    "⚡ Новости": -1003845949396,
-    "😎 Скины": -1003771506128,
-    "🎮 Геймер": -1003832618601,
-    "🗺️ Гид": -1003513951242,
-    "🔑 Инсайдер": -1003621146931,
-    "🗞️ Газета": -1003797505789,
-    "🌎 Мир": -1003760654806,
-    "📱 Роблокс": -1003780188516
+    "🌸 Эстетика": -1003716842510, "💼 Админы": -1003728156774,
+    "⚡ Новости": -1003845949396, "😎 Скины": -1003771506128,
+    "🎮 Геймер": -1003832618601, "🗺️ Гид": -1003513951242,
+    "🔑 Инсайдер": -1003621146931, "🗞️ Газета": -1003797505789,
+    "🌎 Мир": -1003760654806, "📱 Роблокс": -1003780188516
 }
 
 bot = Bot(token=TOKEN)
@@ -77,12 +65,12 @@ async def handle_media(message: types.Message, state: FSMContext):
     msg_type = "photo" if message.photo else "video"
     old_caption = clean_ads(message.caption)
     await state.update_data(file_id=file_id, msg_type=msg_type, old_caption=old_caption, selected_channels=[])
-    await message.reply(f"📥 {msg_type} получено! Куда шлем?", reply_markup=get_selection_kb([]))
+    await message.reply(f"📥 {msg_type} получено! Выбери каналы:", reply_markup=get_selection_kb([]))
     await state.set_state(PostState.selecting)
 
-@dp.message(F.from_user.id == ADMIN_ID, F.text, ~F.text.startswith('/'))
+@dp.message(F.from_user.id == ADMIN_ID, F.text, ~F.state(PostState.typing_text))
 async def handle_text(message: types.Message, state: FSMContext):
-    if await state.get_state() is not None: return
+    if message.text.startswith('/'): return
     old_caption = clean_ads(message.text)
     await state.update_data(file_id=None, msg_type="text", old_caption=old_caption, selected_channels=[])
     await message.reply("📝 Текст получен! Выбери каналы:", reply_markup=get_selection_kb([]))
@@ -107,17 +95,34 @@ async def select_all(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "confirm_select", PostState.selecting)
 async def confirm(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer("Введи текст ('.' - старый, '-' - без текста):")
-    await state.set_state(PostState.typing_text)
+    data = await state.get_data()
+    if data['msg_type'] == "text":
+        # Для текста сразу переходим к рассылке, чтобы не вводить дважды
+        await send_posts(callback.message, state)
+    else:
+        await callback.message.answer("Нужно изменить описание?\nОтправь новый текст, '.' (оставить старый) или '-' (удалить).")
+        await state.set_state(PostState.typing_text)
     await callback.answer()
 
 @dp.message(PostState.typing_text)
-async def process_final(message: types.Message, state: FSMContext):
+async def process_custom_text(message: types.Message, state: FSMContext):
     data = await state.get_data()
-    caption = data['old_caption'] if message.text == "." else ("" if message.text == "-" else message.text)
-    file_id, msg_type, selected_names = data['file_id'], data['msg_type'], data['selected_channels']
+    if message.text == ".":
+        caption = data['old_caption']
+    elif message.text == "-":
+        caption = ""
+    else:
+        caption = message.text
+    
+    await state.update_data(old_caption=caption)
+    await send_posts(message, state)
 
-    status = await message.answer("⏳ Рассылка...")
+async def send_posts(message_obj, state: FSMContext):
+    data = await state.get_data()
+    caption, file_id, msg_type = data['old_caption'], data['file_id'], data['msg_type']
+    selected_names = data['selected_channels']
+
+    status = await message_obj.answer(f"⏳ Публикую...")
     for name in selected_names:
         try:
             cid = CHANNELS[name]
@@ -126,7 +131,7 @@ async def process_final(message: types.Message, state: FSMContext):
             else: await bot.send_message(cid, caption)
             await asyncio.sleep(0.4)
         except Exception as e:
-            await message.answer(f"❌ Ошибка в {name}: {e}")
+            await message_obj.answer(f"❌ Ошибка в {name}: {e}")
     await status.edit_text("✅ Готово!")
     await state.clear()
 
@@ -135,18 +140,10 @@ async def cancel(c: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await c.message.edit_text("Отменено.")
 
-# --- ЗАПУСК ---
 async def main():
-    # Запускаем Flask в фоновом потоке
-    server_thread = Thread(target=run_flask, daemon=True)
-    server_thread.start()
-    
-    logging.info("Starting bot...")
+    Thread(target=run_flask, daemon=True).start()
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO)
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        logging.info("Bot stopped")
+    asyncio.run(main())
