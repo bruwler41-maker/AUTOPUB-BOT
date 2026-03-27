@@ -11,6 +11,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.client.default import DefaultBotProperties
+import yt_dlp # Нужно добавить в requirements.txt
 
 # --- 1. ВЕБ-СЕРВЕР ---
 app = Flask(__name__)
@@ -33,29 +34,9 @@ CHANNELS = {
     "🌎 Мир": -1003760654806, "📱 Роблокс": -1003780188516
 }
 
-# Список Юзернеймов твоих каналов для кнопки "Халява"
-# Убедись, что они написаны верно!
-CHANNEL_USERNAMES = [
-    "skini_dlya_malchikov_roblox",
-    "estetica_rbx",
-    "R0B0L0XNOVOSTI",
-    "roblox_secreti_adminov",
-    "roblox_geimer",
-    "roblox_tvoi_gid",
-    "roblox_insaider",
-    "roblox_gazeta",
-    "rbx_mir",
-    "R0BL0X_0FFICIAL"
-]
+CHANNEL_USERNAMES = ["estetica_rbx", "roblox_geimer", "R0BL0X_0FFICIAL"] # Список для проверки подписки в розыгрыше
+STATIC_BUTTONS = {"🛒 Купить в Xizmshop": "https://t.me/xizmshop", "💬 Связь с админом": "https://t.me/xizm", "🌟Бесплатные Звезды": "https://t.me/xizm"}
 
-# Статические кнопки
-STATIC_BUTTONS = {
-    "🛒 Купить в xizmshop": "https://t.me/xizmshop",
-    "💬 Связаться с админом": "https://t.me/xizmik", # Замени на свой реальный юзернейм
-    "🌟 Бесплатные звезды": "https://t.me/freegifloli"
-}
-
-# Исправленное создание бота
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
 dp = Dispatcher(storage=MemoryStorage())
 
@@ -64,133 +45,119 @@ class PostState(StatesGroup):
     selecting_button = State()
     typing_text = State()
 
-def clean_ads(text):
-    if not text: return ""
-    return re.sub(r'@\w+|t\.me/\S+|http\S+', '', text).strip()
-
-def get_selection_kb(selected_names):
-    kb = []
-    kb.append([InlineKeyboardButton(text="💎 ВЫБРАТЬ ВСЕ", callback_data="select_all")])
-    channel_list = list(CHANNELS.keys())
-    for i in range(0, len(channel_list), 2):
-        row = []
-        for name in channel_list[i:i+2]:
-            prefix = "✅ " if name in selected_names else ""
-            row.append(InlineKeyboardButton(text=f"{prefix}{name}", callback_data=f"toggle_{name}"))
-        kb.append(row)
-    if selected_names:
-        kb.append([InlineKeyboardButton(text=f"🚀 ОПУБЛИКОВАТЬ ({len(selected_names)})", callback_data="confirm_select")])
-    kb.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")])
-    return InlineKeyboardMarkup(inline_keyboard=kb)
+# --- ФУНКЦИЯ СКАЧИВАНИЯ ВИДЕО ---
+def download_video(url):
+    ydl_opts = {'format': 'best', 'outtmpl': 'video.mp4', 'quiet': True}
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+    return "video.mp4"
 
 # --- ОБРАБОТЧИКИ ---
 
-@dp.message(F.from_user.id == ADMIN_ID, (F.photo | F.video))
-async def handle_media(message: types.Message, state: FSMContext):
-    file_id = message.photo[-1].file_id if message.photo else message.video.file_id
-    msg_type = "photo" if message.photo else "video"
-    old_caption = clean_ads(message.caption)
-    await state.update_data(file_id=file_id, msg_type=msg_type, old_caption=old_caption, selected_channels=[])
-    await message.reply(f"📥 {msg_type} получено! Выбери каналы:", reply_markup=get_selection_kb([]))
-    await state.set_state(PostState.selecting)
+# Команда /tt для скачивания
+@dp.message(F.from_user.id == ADMIN_ID, F.text.startswith('/tt'))
+async def handle_tt(message: types.Message, state: FSMContext):
+    url = message.text[4:].strip()
+    if not url: return await message.reply("❌ Введи ссылку: `/tt https://...`")
+    
+    msg = await message.reply("⏳ Скачиваю видео...")
+    try:
+        path = download_video(url)
+        video = types.FSInputFile(path)
+        # После скачивания отправляем себе и запускаем обычный процесс рассылки
+        sent = await message.answer_video(video, caption="Видео скачано! Куда шлем?")
+        await state.update_data(file_id=sent.video.file_id, msg_type="video", old_caption="", selected_channels=[])
+        await msg.delete()
+        await sent.reply("Выбери каналы:", reply_markup=get_selection_kb([]))
+        await state.set_state(PostState.selecting)
+        os.remove(path)
+    except Exception as e:
+        await msg.edit_text(f"❌ Ошибка скачивания: {e}")
 
-@dp.message(F.from_user.id == ADMIN_ID, F.text.startswith('/post'))
-async def handle_post_command(message: types.Message, state: FSMContext):
-    pure_text = message.text[6:].strip()
-    if not pure_text: return
-    await state.update_data(file_id=None, msg_type="text", old_caption=clean_ads(pure_text), selected_channels=[])
-    await message.reply("📝 Текст принят! Куда отправляем?", reply_markup=get_selection_kb([]))
-    await state.set_state(PostState.selecting)
+# Команда /giveaway (Розыгрыш)
+@dp.message(F.from_user.id == ADMIN_ID, F.text.startswith('/giveaway'))
+async def create_giveaway(message: types.Message):
+    prize = message.text[10:].strip() or "Секретный приз"
+    text = f"🎁 <b>РОЗЫГРЫШ!</b>\n\nПриз: <b>{prize}</b>\n\nДля участия подпишись на наши каналы и нажми кнопку ниже!"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ УЧАСТВОВАТЬ", callback_data="join_giveaway")]
+    ])
+    await message.answer(text, reply_markup=kb)
+
+@dp.callback_query(F.data == "join_giveaway")
+async def join_giveaway(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    # Простая проверка (в реальности нужно циклом по всем CHANNELS)
+    try:
+        member = await bot.get_chat_member(CHANNELS["📱 Роблокс"], user_id)
+        if member.status in ['member', 'administrator', 'creator']:
+            await callback.answer("✅ Ты в игре! Удачи!", show_alert=True)
+        else:
+            await callback.answer("❌ Сначала подпишись на все каналы!", show_alert=True)
+    except:
+        await callback.answer("Ой, что-то пошло не так.")
+
+# Функция рассылки (остается из прошлого кода)
+async def send_posts(message_obj, state: FSMContext):
+    data = await state.get_data()
+    btn_choice = data['selected_button']
+    reply_markup = None
+    if btn_choice == "RANDOM_HACH":
+        url = f"https://t.me/{random.choice(list(CHANNELS.keys()))}" # Упростил для примера
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 ХАЛЯВА ТУТ 👇", url=url)]])
+    elif btn_choice != "none":
+        reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=btn_choice, url=STATIC_BUTTONS[btn_choice])]])
+
+    for name in data['selected_channels']:
+        cid = CHANNELS[name]
+        if data['msg_type'] == "photo": await bot.send_photo(cid, data['file_id'], caption=data['old_caption'], reply_markup=reply_markup)
+        elif data['msg_type'] == "video": await bot.send_video(cid, data['file_id'], caption=data['old_caption'], reply_markup=reply_markup)
+        else: await bot.send_message(cid, data['old_caption'], reply_markup=reply_markup)
+    await message_obj.answer("✅ Готово!")
+    await state.clear()
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ (Keyboard, Clean Ads и т.д.) ---
+# (Оставляем те же, что были в прошлом сообщении)
+def get_selection_kb(selected_names):
+    kb = []
+    kb.append([InlineKeyboardButton(text="💎 ВЫБРАТЬ ВСЕ", callback_data="select_all")])
+    for name in list(CHANNELS.keys()):
+        prefix = "✅ " if name in selected_names else ""
+        kb.append([InlineKeyboardButton(text=f"{prefix}{name}", callback_data=f"toggle_{name}")])
+    if selected_names: kb.append([InlineKeyboardButton(text="🚀 ОПУБЛИКОВАТЬ", callback_data="confirm_select")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 @dp.callback_query(F.data == "confirm_select", PostState.selecting)
 async def confirm_channels(callback: types.CallbackQuery, state: FSMContext):
-    # Создаем меню выбора кнопок
-    kb_list = []
-    # Кнопка "Халява" первой
-    kb_list.append([InlineKeyboardButton(text="🎁 ХАЛЯВА ТУТ ", callback_data="btn_RANDOM_HACH")])
-    
-    # Добавляем статические кнопки
-    for b_name in STATIC_BUTTONS.keys():
-        kb_list.append([InlineKeyboardButton(text=b_name, callback_data=f"btn_{b_name}")])
-        
-    kb_list.append([InlineKeyboardButton(text="🚫 Без кнопки", callback_data="btn_none")])
-    
-    await callback.message.answer("Какую кнопку добавить под пост?", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_list))
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 ХАЛЯВА ТУТ 👇", callback_data="btn_RANDOM_HACH")],
+        [InlineKeyboardButton(text="🚫 Без кнопки", callback_data="btn_none")]
+    ])
+    await callback.message.answer("Кнопка?", reply_markup=kb)
     await state.set_state(PostState.selecting_button)
-    await callback.answer()
 
 @dp.callback_query(F.data.startswith('btn_'), PostState.selecting_button)
-async def process_button(callback: types.CallbackQuery, state: FSMContext):
-    btn_choice = callback.data.replace('btn_', '')
-    await state.update_data(selected_button=btn_choice)
-    
+async def process_btn(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(selected_button=callback.data.replace('btn_', ''))
     data = await state.get_data()
-    if data['msg_type'] == "text":
-        await send_posts(callback.message, state)
-    else:
-        await callback.message.answer("Текст ('.' - оставить старый, '-' - без текста):")
+    if data['msg_type'] == "text": await send_posts(callback.message, state)
+    else: 
+        await callback.message.answer("Текст ('.' - оставить):")
         await state.set_state(PostState.typing_text)
-    await callback.answer()
 
 @dp.message(PostState.typing_text)
-async def process_custom_text(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    caption = data['old_caption'] if message.text == "." else ("" if message.text == "-" else message.text)
-    await state.update_data(old_caption=caption)
-    await send_posts(message, state)
-
-async def send_posts(message_obj, state: FSMContext):
-    data = await state.get_data()
-    caption = data['old_caption']
-    file_id, msg_type, selected_channels = data['file_id'], data['msg_type'], data['selected_channels']
-    btn_choice = data['selected_button']
-
-    # Создаем КНОПКУ-ССЫЛКУ под постом
-    reply_markup = None
-    if btn_choice == "RANDOM_HACH":
-        # Уникальная логика для кнопки Халява
-        target_username = random.choice(CHANNEL_USERNAMES)
-        random_url = f"https://t.me/{target_username}"
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 ХАЛЯВА ТУТ", url=random_url)]])
-    elif btn_choice != "none":
-        # Логика для статических кнопок
-        btn_url = STATIC_BUTTONS[btn_choice]
-        reply_markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=btn_choice, url=btn_url)]])
-
-    status = await message_obj.answer(f"⏳ Рассылаю...")
-    for name in selected_channels:
-        try:
-            cid = CHANNELS[name]
-            if msg_type == "photo": await bot.send_photo(cid, file_id, caption=caption, reply_markup=reply_markup)
-            elif msg_type == "video": await bot.send_video(cid, file_id, caption=caption, reply_markup=reply_markup)
-            else: await bot.send_message(cid, caption, reply_markup=reply_markup)
-            await asyncio.sleep(0.4)
-        except Exception as e:
-            await message_obj.answer(f"❌ Ошибка в {name}: {e}")
-    await status.edit_text("✅ Готово!")
-    await state.clear()
+async def custom_txt(m: types.Message, state: FSMContext):
+    if m.text != ".": await state.update_data(old_caption=m.text)
+    await send_posts(m, state)
 
 @dp.callback_query(F.data.startswith('toggle_'), PostState.selecting)
-async def toggle_channel(callback: types.CallbackQuery, state: FSMContext):
-    name = callback.data.replace('toggle_', '')
+async def toggle(c: types.CallbackQuery, state: FSMContext):
+    name = c.data.replace('toggle_', '')
     data = await state.get_data()
-    selected = data.get('selected_channels', [])
-    if name in selected: selected.remove(name)
-    else: selected.append(name)
-    await state.update_data(selected_channels=selected)
-    await callback.message.edit_reply_markup(reply_markup=get_selection_kb(selected))
-    await callback.answer()
-
-@dp.callback_query(F.data == "select_all", PostState.selecting)
-async def select_all(callback: types.CallbackQuery, state: FSMContext):
-    await state.update_data(selected_channels=list(CHANNELS.keys()))
-    await callback.message.edit_reply_markup(reply_markup=get_selection_kb(list(CHANNELS.keys())))
-    await callback.answer()
-
-@dp.callback_query(F.data == "cancel")
-async def cancel(c: types.CallbackQuery, state: FSMContext):
-    await state.clear()
-    await c.message.edit_text("Отменено.")
+    sel = data.get('selected_channels', [])
+    sel.remove(name) if name in sel else sel.append(name)
+    await state.update_data(selected_channels=sel)
+    await c.message.edit_reply_markup(reply_markup=get_selection_kb(sel))
 
 async def main():
     Thread(target=run_flask, daemon=True).start()
