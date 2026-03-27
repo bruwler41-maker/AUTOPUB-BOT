@@ -1,7 +1,7 @@
 import os
+import re
 import asyncio
 import logging
-import random
 from flask import Flask
 from threading import Thread
 from aiogram import Bot, Dispatcher, types, F
@@ -9,19 +9,17 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 
-# --- ВЕБ-СЕРВЕР ---
+# --- 1. ВЕБ-СЕРВЕР ---
 app = Flask(__name__)
 @app.route('/')
-def index(): return "AUTOPUB IS READY"
+def index(): return "AUTOPUB IS RUNNING"
 
 def run_flask():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- НАСТРОЙКИ ---
+# --- 2. НАСТРОЙКИ ---
 TOKEN = '8699304309:AAGkHhyeGQqzg3KQtzez_5B9a3RcQsTTC7g'
 ADMIN_ID = 5215754222
 
@@ -33,134 +31,123 @@ CHANNELS = {
     "🌎 Мир": -1003760654806, "📱 Роблокс": -1003780188516
 }
 
-# Инициализация с учетом новых правил библиотеки
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-
-GIVEAWAY_USERS = {} # Хранение участников {msg_id: [user_ids]}
 
 class PostState(StatesGroup):
     selecting = State()
-    waiting_links = State()
-    waiting_time = State()
+    typing_text = State()
 
-# --- ФУНКЦИИ ---
+def clean_ads(text):
+    if not text: return ""
+    return re.sub(r'@\w+|t\.me/\S+|http\S+', '', text).strip()
 
-def get_kb(selected, is_giveaway=False):
-    kb = [[InlineKeyboardButton(text="💎 ВЫБРАТЬ ВСЕ", callback_data="all")]]
-    names = list(CHANNELS.keys())
-    for i in range(0, len(names), 2):
-        row = [InlineKeyboardButton(text=f"{'✅ ' if n in selected else ''}{n}", callback_data=f"tg_{n}") for n in names[i:i+2]]
+def get_selection_kb(selected_names):
+    kb = []
+    kb.append([InlineKeyboardButton(text="💎 ВЫБРАТЬ ВСЕ", callback_data="select_all")])
+    channel_list = list(CHANNELS.keys())
+    for i in range(0, len(channel_list), 2):
+        row = []
+        for name in channel_list[i:i+2]:
+            prefix = "✅ " if name in selected_names else ""
+            row.append(InlineKeyboardButton(text=f"{prefix}{name}", callback_data=f"toggle_{name}"))
         kb.append(row)
-    if selected:
-        kb.append([InlineKeyboardButton(text="🚀 ЗАПУСТИТЬ", callback_data="confirm")])
+    if selected_names:
+        kb.append([InlineKeyboardButton(text=f"🚀 ОПУБЛИКОВАТЬ ({len(selected_names)})", callback_data="confirm_select")])
     kb.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cancel")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
-# --- КОМАНДЫ ---
+# --- ОБРАБОТЧИКИ ---
 
-@dp.message(F.from_user.id == ADMIN_ID, F.text.startswith('/giveaway'))
-async def start_give(m: types.Message, s: FSMContext):
-    prize = m.text[10:].strip() or "Приз"
-    await s.update_data(prize=prize, msg_type="giveaway", req_chats=[])
-    await m.answer(f"🎁 Розыгрыш: <b>{prize}</b>\n\nПрисылай ссылки на каналы для подписки по одной.\nКогда закончишь, нажми кнопку ниже 👇", 
-                   reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ ГОТОВО", callback_data="links_done")]]))
-    await s.set_state(PostState.waiting_links)
+# Хендлер для Фото и Видео
+@dp.message(F.from_user.id == ADMIN_ID, (F.photo | F.video))
+async def handle_media(message: types.Message, state: FSMContext):
+    file_id = message.photo[-1].file_id if message.photo else message.video.file_id
+    msg_type = "photo" if message.photo else "video"
+    old_caption = clean_ads(message.caption)
+    await state.update_data(file_id=file_id, msg_type=msg_type, old_caption=old_caption, selected_channels=[])
+    await message.reply(f"📥 {msg_type} получено! Выбери каналы:", reply_markup=get_selection_kb([]))
+    await state.set_state(PostState.selecting)
 
-@dp.message(PostState.waiting_links)
-async def add_link(m: types.Message, s: FSMContext):
-    link = m.text.strip()
-    u = link.split('/')[-1].replace('@', '')
-    try:
-        chat = await bot.get_chat(f"@{u}")
-        data = await s.get_data()
-        chats = data.get('req_chats', [])
-        chats.append({'id': chat.id, 'title': chat.title, 'link': link})
-        await s.update_data(req_chats=chats)
-        await m.answer(f"✅ Добавлен: {chat.title}\nВсего каналов: {len(chats)}")
-    except: await m.answer("Бот не нашел канал. Убедись, что он там админ!")
-
-@dp.callback_query(F.data == "links_done", PostState.waiting_links)
-async def set_time(c: types.CallbackQuery, s: FSMContext):
-    await c.message.answer("Через сколько МИНУТ завершить розыгрыш?")
-    await s.set_state(PostState.waiting_time)
-
-@dp.message(PostState.waiting_time)
-async def process_time(m: types.Message, s: FSMContext):
-    if not m.text.isdigit(): return await m.reply("Введи число!")
-    data = await s.get_data()
-    links = "\n".join([f"🔹 <a href='{c['link']}'>{c['title']}</a>" for c in data['req_chats']])
-    text = f"🎁 <b>РОЗЫГРЫШ!</b>\n\nПриз: <b>{data['prize']}</b>\n⏳ Итоги через: {m.text} мин.\n\nПодпишись:\n{links}\n\nЖми кнопку ниже! 👇"
-    await s.update_data(caption=text, time=int(m.text), selected=[])
-    await m.answer(f"Превью:\n\n{text}", reply_markup=get_kb([], True))
-    await s.set_state(PostState.selecting)
-
-# Кнопка проверки для участников
-@dp.callback_query(F.data.startswith("join_"))
-async def join_handler(c: types.CallbackQuery):
-    ids = [int(i) for i in c.data.split("_")[1:]]
-    for cid in ids:
-        user = await bot.get_chat_member(cid, c.from_user.id)
-        if user.status not in ['member', 'administrator', 'creator']:
-            return await c.answer("❌ Ты не подписан на все каналы!", show_alert=True)
+# Специальный хендлер для текста по команде /post
+@dp.message(F.from_user.id == ADMIN_ID, F.text.startswith('/post'))
+async def handle_post_command(message: types.Message, state: FSMContext):
+    # Отрезаем "/post " (первые 6 символов)
+    pure_text = message.text[6:].strip()
     
-    mid = str(c.message.message_id)
-    if mid not in GIVEAWAY_USERS: GIVEAWAY_USERS[mid] = []
-    if c.from_user.id in GIVEAWAY_USERS[mid]: return await c.answer("Ты уже участвуешь!", show_alert=True)
-    
-    GIVEAWAY_USERS[mid].append(c.from_user.id)
-    await c.answer("✅ Ты в списке участников!", show_alert=True)
+    if not pure_text:
+        await message.reply("❌ Напиши текст после команды, например: `/post Привет всем!`")
+        return
 
-# --- РАССЫЛКА ---
+    old_caption = clean_ads(pure_text)
+    await state.update_data(file_id=None, msg_type="text", old_caption=old_caption, selected_channels=[])
+    await message.reply("📝 Текст принят! Куда отправляем?", reply_markup=get_selection_kb([]))
+    await state.set_state(PostState.selecting)
 
-async def run_giveaway(m_obj, s: FSMContext):
-    data = await s.get_data()
-    ids_str = "_".join([str(c['id']) for c in data['req_chats']])
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ УЧАСТВОВАТЬ", callback_data=f"join_{ids_str}")]])
-    
-    sent_msgs = []
-    for name in data['selected']:
-        msg = await bot.send_message(CHANNELS[name], data['caption'], reply_markup=kb)
-        sent_msgs.append(msg)
-    
-    await m_obj.answer("🚀 Розыгрыш запущен!")
-    await asyncio.sleep(data['time'] * 60)
-    
-    # Выбор победителя
-    all_participants = []
-    for m in sent_msgs:
-        if str(m.message_id) in GIVEAWAY_USERS:
-            all_participants.extend(GIVEAWAY_USERS[str(m.message_id)])
-    
-    all_participants = list(set(all_participants))
-    if all_participants:
-        winner_id = random.choice(all_participants)
-        winner = await bot.get_chat(winner_id)
-        res = f"🎊 <b>ИТОГИ РОЗЫГРЫША!</b>\n\nПобедитель: <a href='tg://user?id={winner_id}'>{winner.full_name}</a>\nПриз: {data['prize']}"
-    else: res = "Победитель не выбран (нет участников)."
-    
-    for name in data['selected']: await bot.send_message(CHANNELS[name], res)
-    await s.clear()
+@dp.callback_query(F.data.startswith('toggle_'), PostState.selecting)
+async def toggle_channel(callback: types.CallbackQuery, state: FSMContext):
+    name = callback.data.replace('toggle_', '')
+    data = await state.get_data()
+    selected = data.get('selected_channels', [])
+    if name in selected: selected.remove(name)
+    else: selected.append(name)
+    await state.update_data(selected_channels=selected)
+    await callback.message.edit_reply_markup(reply_markup=get_selection_kb(selected))
+    await callback.answer()
 
-# --- СТАНДАРТНОЕ ---
+@dp.callback_query(F.data == "select_all", PostState.selecting)
+async def select_all(callback: types.CallbackQuery, state: FSMContext):
+    await state.update_data(selected_channels=list(CHANNELS.keys()))
+    await callback.message.edit_reply_markup(reply_markup=get_selection_kb(list(CHANNELS.keys())))
+    await callback.answer()
 
-@dp.callback_query(F.data.startswith('tg_'), PostState.selecting)
-async def toggle(c: types.CallbackQuery, s: FSMContext):
-    n = c.data.replace('tg_', ''); d = await s.get_data(); sel = d.get('selected', [])
-    sel.remove(n) if n in sel else sel.append(n); await s.update_data(selected=sel)
-    await c.message.edit_reply_markup(reply_markup=get_kb(sel, d.get('msg_type')=="giveaway"))
+@dp.callback_query(F.data == "confirm_select", PostState.selecting)
+async def confirm(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if data['msg_type'] == "text":
+        await send_posts(callback.message, state)
+    else:
+        await callback.message.answer("Нужно изменить описание?\nОтправь новый текст, '.' (оставить старый) или '-' (удалить).")
+        await state.set_state(PostState.typing_text)
+    await callback.answer()
 
-@dp.callback_query(F.data == "confirm", PostState.selecting)
-async def confirm(c: types.CallbackQuery, s: FSMContext):
-    await run_giveaway(c.message, s); await c.answer()
+@dp.message(PostState.typing_text)
+async def process_custom_text(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    if message.text == ".": caption = data['old_caption']
+    elif message.text == "-": caption = ""
+    else: caption = message.text
+    
+    await state.update_data(old_caption=caption)
+    await send_posts(message, state)
+
+async def send_posts(message_obj, state: FSMContext):
+    data = await state.get_data()
+    caption, file_id, msg_type = data['old_caption'], data['file_id'], data['msg_type']
+    selected_channels = data['selected_channels']
+
+    status = await message_obj.answer(f"⏳ Публикую в {len(selected_channels)} каналов...")
+    for name in selected_channels:
+        try:
+            cid = CHANNELS[name]
+            if msg_type == "photo": await bot.send_photo(cid, file_id, caption=caption)
+            elif msg_type == "video": await bot.send_video(cid, file_id, caption=caption)
+            else: await bot.send_message(cid, caption)
+            await asyncio.sleep(0.4)
+        except Exception as e:
+            await message_obj.answer(f"❌ Ошибка в {name}: {e}")
+    await status.edit_text("✅ Готово!")
+    await state.clear()
 
 @dp.callback_query(F.data == "cancel")
-async def cancel(c: types.CallbackQuery, s: FSMContext):
-    await s.clear(); await c.message.edit_text("Отменено.")
+async def cancel(c: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await c.message.edit_text("Отменено.")
 
 async def main():
     Thread(target=run_flask, daemon=True).start()
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO); asyncio.run(main())
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(main())
