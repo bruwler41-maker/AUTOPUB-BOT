@@ -11,9 +11,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 import yt_dlp
 
-# --- 1. ВЕБ-СЕРВЕР (Для Render) ---
+# --- 1. ВЕБ-СЕРВЕР (Для работы на Render) ---
 app = Flask(__name__)
 @app.route('/')
 def index(): return "BOT IS ACTIVE"
@@ -24,7 +25,7 @@ def run_flask():
 
 # --- 2. НАСТРОЙКИ ---
 TOKEN = '8699304309:AAGkHhyeGQqzg3KQtzez_5B9a3RcQsTTC7g'
-ADMIN_ID = 5215754222
+ADMIN_ID = 5215754222 # Твой ID из логов
 
 CHANNELS = {
     "🌸 Эстетика": -1003716842510, "💼 Админы": -1003728156774,
@@ -34,10 +35,14 @@ CHANNELS = {
     "🌎 Мир": -1003760654806, "📱 Роблокс": -1003780188516
 }
 
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode='HTML'))
+# ИСПРАВЛЕННАЯ ИНИЦИАЛИЗАЦИЯ (Убирает ошибку TypeError из видео)
+bot = Bot(
+    token=TOKEN, 
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Хранилище участников розыгрышей {сообщение_id: [список_user_id]}
+# Хранилище участников розыгрышей
 GIVEAWAY_DATA = {}
 
 class PostState(StatesGroup):
@@ -66,6 +71,12 @@ def get_selection_kb(selected_names, is_giveaway=False):
 
 # --- ОБРАБОТЧИКИ ---
 
+# Сброс состояния
+@dp.message(F.text == "/cancel")
+async def cmd_cancel(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Действие отменено.")
+
 # Скачивание видео /tt
 @dp.message(F.from_user.id == ADMIN_ID, F.text.startswith('/tt'))
 async def tt_download(m: types.Message, s: FSMContext):
@@ -80,7 +91,7 @@ async def tt_download(m: types.Message, s: FSMContext):
         await s.update_data(file_id=sent.video.file_id, msg_type="video", old_caption="", selected_channels=[])
         await s.set_state(PostState.selecting)
         await sent.reply("Выбери каналы:", reply_markup=get_selection_kb([]))
-        os.remove('v.mp4')
+        if os.path.exists('v.mp4'): os.remove('v.mp4')
     except Exception as e: await wait.edit_text(f"Ошибка: {e}")
 
 # Розыгрыш /giveaway
@@ -94,6 +105,7 @@ async def start_give(m: types.Message, s: FSMContext):
 
 @dp.message(PostState.waiting_giveaway_links)
 async def add_link(m: types.Message, s: FSMContext):
+    if not m.text.startswith('http'): return
     u = m.text.split('/')[-1].replace('@', '')
     try:
         chat = await bot.get_chat(f"@{u}")
@@ -110,31 +122,33 @@ async def links_done(c: types.CallbackQuery, s: FSMContext):
 
 @dp.message(PostState.waiting_cond_val)
 async def set_time(m: types.Message, s: FSMContext):
-    if not m.text.isdigit(): return await m.reply("Числом!")
+    if not m.text.isdigit(): return await m.reply("Введите число минут!")
     d = await s.get_data(); l_txt = "\n".join([f"🔹 <a href='{x['link']}'>{x['title']}</a>" for x in d['req_chats']])
     cap = f"🎁 <b>РОЗЫГРЫШ!</b>\n\nПриз: <b>{d['prize']}</b>\n⏳ Итоги через: {m.text} мин.\n\nПодпишись:\n{l_txt}\n\nЖми кнопку! 👇"
     await s.update_data(old_caption=cap, timer=int(m.text), selected_channels=[])
-    await m.answer(f"Превью:\n{cap}", reply_markup=get_selection_kb([], True))
+    await m.answer(f"Превью поста:\n\n{cap}", reply_markup=get_selection_kb([], True))
     await s.set_state(PostState.selecting)
 
-# Кнопка участия
+# Кнопка участия (для обычных пользователей)
 @dp.callback_query(F.data.startswith("join_"))
 async def join_give(c: types.CallbackQuery):
     ids = [int(i) for i in c.data.split("_")[1:]]
     uid = c.from_user.id
     for cid in ids:
-        m = await bot.get_chat_member(cid, uid)
-        if m.status not in ['member', 'administrator', 'creator']:
-            return await c.answer("❌ Подпишись на ВСЕ каналы!", show_alert=True)
+        try:
+            m = await bot.get_chat_member(cid, uid)
+            if m.status not in ['member', 'administrator', 'creator']:
+                return await c.answer("❌ Подпишись на ВСЕ каналы из списка!", show_alert=True)
+        except: return await c.answer("Ошибка проверки подписки.", show_alert=True)
     
     mid = str(c.message.message_id)
     if mid not in GIVEAWAY_DATA: GIVEAWAY_DATA[mid] = []
-    if uid in GIVEAWAY_DATA[mid]: return await c.answer("Ты уже в игре!", show_alert=True)
+    if uid in GIVEAWAY_DATA[mid]: return await c.answer("Ты уже участвуешь!", show_alert=True)
     
     GIVEAWAY_DATA[mid].append(uid)
-    await c.answer("✅ Ты участвуешь!", show_alert=True)
+    await c.answer("✅ Ты успешно зарегистрирован!", show_alert=True)
 
-# Рассылка
+# Функция рассылки
 async def final_send(m_obj, s: FSMContext):
     d = await s.get_data(); sel = d['selected_channels']; cap = d['old_caption']
     sent_messages = []
@@ -146,7 +160,7 @@ async def final_send(m_obj, s: FSMContext):
             msg = await bot.send_message(CHANNELS[name], cap, reply_markup=kb)
             sent_messages.append(msg)
         
-        await m_obj.answer(f"🚀 Розыгрыш запущен! Итоги через {d['timer']} мин.")
+        await m_obj.answer(f"🚀 Розыгрыш запущен в {len(sel)} каналах!")
         await asyncio.sleep(d['timer'] * 60)
         
         # Выбор победителя
@@ -160,7 +174,7 @@ async def final_send(m_obj, s: FSMContext):
             win_id = random.choice(all_users)
             win_user = await bot.get_chat(win_id)
             win_text = f"🎊 <b>ИТОГИ РОЗЫГРЫША!</b>\nПриз: {d['prize']}\n\nПобедитель: <a href='tg://user?id={win_id}'>{win_user.full_name}</a>"
-        else: win_text = "😢 Победитель не выбран (нет участников)."
+        else: win_text = f"😢 Розыгрыш завершен, но участников не было.\nПриз: {d['prize']}"
         
         for name in sel: await bot.send_message(CHANNELS[name], win_text)
     else:
@@ -172,23 +186,28 @@ async def final_send(m_obj, s: FSMContext):
         
         for name in sel:
             cid = CHANNELS[name]
-            if d['msg_type'] == "photo": await bot.send_photo(cid, d['file_id'], caption=cap, reply_markup=markup)
-            elif d['msg_type'] == "video": await bot.send_video(cid, d['file_id'], caption=cap, reply_markup=markup)
-            else: await bot.send_message(cid, cap, reply_markup=markup)
+            try:
+                if d['msg_type'] == "photo": await bot.send_photo(cid, d['file_id'], caption=cap, reply_markup=markup)
+                elif d['msg_type'] == "video": await bot.send_video(cid, d['file_id'], caption=cap, reply_markup=markup)
+                else: await bot.send_message(cid, cap, reply_markup=markup)
+            except Exception as e: await m_obj.answer(f"Ошибка в {name}: {e}")
     
-    await m_obj.answer("✅ Готово!")
+    await m_obj.answer("✅ Рассылка завершена!")
     await s.clear()
 
-# --- СТАНДАРТНЫЕ ХЕНДЛЕРЫ ---
+# Обработка медиа
 @dp.message(F.from_user.id == ADMIN_ID, (F.photo | F.video))
 async def h_media(m, s):
     await s.update_data(file_id=m.photo[-1].file_id if m.photo else m.video.file_id, msg_type="photo" if m.photo else "video", old_caption=m.caption or "", selected_channels=[])
-    await m.reply("Каналы:", reply_markup=get_selection_kb([])); await s.set_state(PostState.selecting)
+    await m.reply("Выберите каналы:", reply_markup=get_selection_kb([]))
+    await s.set_state(PostState.selecting)
 
 @dp.callback_query(F.data.startswith('tg_'), PostState.selecting)
 async def h_tg(c, s):
     n = c.data.replace('tg_', ''); d = await s.get_data(); sel = d.get('selected_channels', [])
-    sel.remove(n) if n in sel else sel.append(n); await s.update_data(selected_channels=sel)
+    if n in sel: sel.remove(n)
+    else: sel.append(n)
+    await s.update_data(selected_channels=sel)
     await c.message.edit_reply_markup(reply_markup=get_selection_kb(sel, d.get('msg_type')=="giveaway"))
 
 @dp.callback_query(F.data == "all", PostState.selecting)
@@ -201,14 +220,15 @@ async def h_conf(c, s):
     d = await s.get_data()
     if d.get('msg_type') == "giveaway": await final_send(c.message, s)
     else:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 ХАЛЯВА", callback_data="b_RANDOM")],[InlineKeyboardButton(text="🚫 Нет", callback_data="b_none")]])
-        await c.message.answer("Кнопка?", reply_markup=kb); await s.set_state(PostState.selecting_button)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🎁 ХАЛЯВА", callback_data="b_RANDOM")],[InlineKeyboardButton(text="🚫 Без кнопки", callback_data="b_none")]])
+        await c.message.answer("Добавить кнопку?", reply_markup=kb)
+        await s.set_state(PostState.selecting_button)
 
 @dp.callback_query(F.data.startswith('b_'), PostState.selecting_button)
 async def h_b(c, s):
     await s.update_data(btn=c.data.replace('b_', '')); d = await s.get_data()
-    if d['msg_type'] == "text": await final_send(c.message, s)
-    else: await c.message.answer("Текст ('.' - оставить):"); await s.set_state(PostState.typing_text)
+    await c.message.answer("Введите текст под медиа (отправьте '.' чтобы оставить как есть):")
+    await s.set_state(PostState.typing_text)
 
 @dp.message(PostState.typing_text)
 async def h_txt(m, s):
@@ -216,11 +236,12 @@ async def h_txt(m, s):
     await final_send(m, s)
 
 @dp.callback_query(F.data == "cancel")
-async def h_cancel(c, s): await s.clear(); await c.message.edit_text("Отмена.")
+async def h_cancel(c, s): await s.clear(); await c.message.edit_text("❌ Действие отменено.")
 
 async def main():
     Thread(target=run_flask, daemon=True).start()
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO); asyncio.run(main())
+    logging.basicConfig(level=logging.INFO)
+    asyncio.run(main())
