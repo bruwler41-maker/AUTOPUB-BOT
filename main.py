@@ -36,6 +36,9 @@ CHANNELS = {
 }
 
 # ИСПРАВЛЕННАЯ ИНИЦИАЛИЗАЦИЯ (Убирает ошибку TypeError из видео)
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
+
 bot = Bot(
     token=TOKEN, 
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
