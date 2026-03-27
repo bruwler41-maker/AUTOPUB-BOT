@@ -56,7 +56,7 @@ def get_post_kb():
         [InlineKeyboardButton(text="🎲 Рандомный канал с халявой", url=random_link)],
         [
             InlineKeyboardButton(text="🌟 Бесплатные звезды", url="https://t.me/freegifloli"),
-            InlineKeyboardButton(text="🛍️ xizmshop", url="https://t.me/xizmshop")
+            InlineKeyboardButton(text="🛍️ Xizmshop", url="https://t.me/xizmshop")
         ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
